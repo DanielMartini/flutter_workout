@@ -6,16 +6,29 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:workout/workout.dart';
 import 'package:flutter_tizen/flutter_tizen.dart' as tizen;
 
+/// Represents a single health metric reading.
+class HealthMetricReading {
+  final WorkoutFeature feature;
+  final double value;
+  final int timestamp; // Timestamp en milisegundos desde la época
+
+  HealthMetricReading(this.feature, this.value, this.timestamp);
+
+  @override
+  String toString() => 'HealthMetricReading(feature: $feature, value: $value, timestamp: $timestamp)';
+}
+
 /// Base class for flutter_workout
 class Workout {
   static const _channel = MethodChannel('workout');
 
-  final _streamController = StreamController<WorkoutReading>.broadcast();
+  final _streamController = StreamController<Map<String, HealthMetricReading>>.broadcast();
 
   var _currentFeatures = <WorkoutFeature>[];
 
-  /// A stream of [WorkoutReading] collected by the workout session
-  Stream<WorkoutReading> get stream => _streamController.stream;
+  /// A stream of [HealthMetricReading]s collected by the workout session,
+  /// delivered as a map of all updated features.
+  Stream<Map<String, HealthMetricReading>> get stream => _streamController.stream;
 
   /// Create a [Workout]
   Workout() {
@@ -31,7 +44,7 @@ class Workout {
     if (!Platform.isAndroid) return [];
 
     final result =
-        await _channel.invokeListMethod<int>('getSupportedExerciseTypes');
+    await _channel.invokeListMethod<int>('getSupportedExerciseTypes');
 
     final types = <ExerciseType>[];
     for (final id in result!) {
@@ -60,6 +73,10 @@ class Workout {
   ///
   /// [lapLength] is the length of the pool in meters
   ///
+  /// **[updateIntervalMillis]**: The minimum interval in milliseconds between updates
+  /// sent from the native platform to Flutter. Defaults to 500ms.
+  /// Set to 0 to receive all updates as they come (not recommended for UI).
+  ///
   /// iOS: Calls `startWatchApp` with the given configuration. Requires both
   /// apps to have the `HealthKit` entitlement. The watch app must have the
   /// `Workout Processing` background mode enabled.
@@ -67,6 +84,7 @@ class Workout {
     required ExerciseType exerciseType,
     required List<WorkoutFeature> features,
     bool enableGps = false,
+    int updateIntervalMillis = 500,
     WorkoutLocationType? locationType,
     WorkoutSwimmingLocationType? swimmingLocationType,
     double? lapLength,
@@ -74,7 +92,11 @@ class Workout {
     _currentFeatures = features;
 
     if (Platform.isAndroid) {
-      return _initWearOS(exerciseType: exerciseType, enableGps: enableGps);
+      return _initWearOS(
+        exerciseType: exerciseType,
+        enableGps: enableGps,
+        updateIntervalMillis: updateIntervalMillis,
+      );
     } else if (Platform.isIOS) {
       return _initIos(
         exerciseType: exerciseType,
@@ -83,7 +105,6 @@ class Workout {
         lapLength: lapLength,
       );
     } else if (tizen.isTizen) {
-      // This is Tizen
       return _initTizen();
     } else {
       throw UnsupportedError('Unsupported platform');
@@ -93,6 +114,7 @@ class Workout {
   Future<WorkoutStartResult> _initWearOS({
     required ExerciseType exerciseType,
     required bool enableGps,
+    required int updateIntervalMillis,
   }) async {
     final sensors = <String>[];
 
@@ -110,7 +132,7 @@ class Workout {
       WorkoutFeature.speed,
     };
     final requestedActivityRecognitionFeatures =
-        _currentFeatures.toSet().intersection(activityRecognitionFeatures);
+    _currentFeatures.toSet().intersection(activityRecognitionFeatures);
 
     if (requestedActivityRecognitionFeatures.isNotEmpty) {
       final status = await Permission.activityRecognition.request();
@@ -130,6 +152,7 @@ class Workout {
       exerciseType: exerciseType,
       sensors: sensors,
       enableGps: enableGps,
+      updateIntervalMillis: updateIntervalMillis,
     );
   }
 
@@ -161,6 +184,7 @@ class Workout {
         sensors.add('pedometer');
       }
     }
+
     return _start(sensors: sensors);
   }
 
@@ -168,6 +192,7 @@ class Workout {
     ExerciseType? exerciseType,
     List<String> sensors = const [],
     bool enableGps = false,
+    int updateIntervalMillis = 500,
     WorkoutLocationType? locationType,
     WorkoutSwimmingLocationType? swimmingLocationType,
     double? lapLength,
@@ -178,6 +203,7 @@ class Workout {
         'exerciseType': exerciseType?.id,
         'sensors': sensors,
         'enableGps': enableGps,
+        'updateIntervalMillis': updateIntervalMillis, // Lo enviamos a Kotlin
         'locationType': locationType?.id,
         'swimmingLocationType': swimmingLocationType?.id,
         'lapLength': lapLength,
@@ -192,30 +218,32 @@ class Workout {
   }
 
   Future<dynamic> _handleMessage(MethodCall call) {
-    try {
-      final arguments = call.arguments as List<dynamic>;
-      final featureString = arguments[0] as String;
-      final value = arguments[1] as double;
-
-      // I can't get maps to work in C++ and there aren't any errors, so this is what we got
-      late final int? timestamp;
+    if (call.method == 'dataReceived') {
       try {
-        timestamp = arguments[2] as int;
-      } catch (_) {
-        timestamp = null;
-      }
+        final Map<String, dynamic> healthDataMap = Map<String, dynamic>.from(call.arguments);
 
-      if (!_currentFeatures.map((e) => e.name).contains(featureString)) {
-        // Don't send features the developer didn't ask for (ahem... Tizen)
+        final Map<String, HealthMetricReading> currentReadings = {};
+
+        healthDataMap.forEach((featureString, data) {
+          final Map<String, dynamic> metricData = Map<String, dynamic>.from(data);
+          final double value = metricData['value'] as double;
+          final int timestamp = metricData['timestamp'] as int;
+
+          if (_currentFeatures.map((e) => e.name).contains(featureString)) {
+            final feature = WorkoutFeature.values.byName(featureString);
+            currentReadings[featureString] = HealthMetricReading(feature, value, timestamp);
+          }
+        });
+
+        if (currentReadings.isNotEmpty) {
+          _streamController.add(currentReadings);
+        }
         return Future.value();
+      } catch (e) {
+        debugPrint('Error processing dataReceived: $e');
+        return Future.error(e);
       }
-
-      final feature = WorkoutFeature.values.byName(featureString);
-
-      _streamController.add(WorkoutReading(feature, value, timestamp));
-      return Future.value();
-    } catch (e) {
-      return Future.error(e);
     }
+    return Future.value();
   }
 }

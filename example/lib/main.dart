@@ -27,6 +27,7 @@ class _MyAppState extends State<MyApp> {
     WorkoutFeature.speed,
   ];
   final enableGps = true;
+  final updateIntervalMillis = 1000;
 
   double heartRate = 0;
   double calories = 0;
@@ -36,31 +37,31 @@ class _MyAppState extends State<MyApp> {
   bool started = false;
 
   _MyAppState() {
-    workout.stream.listen((event) {
-      debugPrint('${event.feature}: ${event.value} (${event.timestamp})');
-      switch (event.feature) {
-        case WorkoutFeature.unknown:
-          return;
-        case WorkoutFeature.heartRate:
-          setState(() {
-            heartRate = event.value;
-          });
-        case WorkoutFeature.calories:
-          setState(() {
-            calories = event.value;
-          });
-        case WorkoutFeature.steps:
-          setState(() {
-            steps = event.value;
-          });
-        case WorkoutFeature.distance:
-          setState(() {
-            distance = event.value;
-          });
-        case WorkoutFeature.speed:
-          setState(() {
-            speed = event.value;
-          });
+    workout.stream.listen((readingsMap) {
+      if (readingsMap.containsKey('heartRate')) {
+        setState(() {
+          heartRate = readingsMap['heartRate']!.value;
+        });
+      }
+      if (readingsMap.containsKey('calories')) {
+        setState(() {
+          calories = readingsMap['calories']!.value;
+        });
+      }
+      if (readingsMap.containsKey('steps')) {
+        setState(() {
+          steps = readingsMap['steps']!.value;
+        });
+      }
+      if (readingsMap.containsKey('distance')) {
+        setState(() {
+          distance = readingsMap['distance']!.value;
+        });
+      }
+      if (readingsMap.containsKey('speed')) {
+        setState(() {
+          speed = readingsMap['speed']!.value;
+        });
       }
     });
   }
@@ -69,8 +70,6 @@ class _MyAppState extends State<MyApp> {
   Widget build(BuildContext context) {
     return MaterialApp(
       theme: ThemeData.dark().copyWith(scaffoldBackgroundColor: Colors.black),
-      // Use ambient mode to stay alive in the foreground
-      // Use a foreground service if you want to stay alive in the background
       home: AmbientMode(
         builder: (context, mode, child) => child!,
         child: Scaffold(
@@ -104,15 +103,14 @@ class _MyAppState extends State<MyApp> {
       debugPrint('Supported exercise types: ${supportedExerciseTypes.length}');
 
       final result = await workout.start(
-        // In a real application, check the supported exercise types first
         exerciseType: exerciseType,
         features: features,
         enableGps: enableGps,
+        updateIntervalMillis: updateIntervalMillis,
       );
 
       if (result.unsupportedFeatures.isNotEmpty) {
         debugPrint('Unsupported features: ${result.unsupportedFeatures}');
-        // In a real application, update the UI to match
       } else {
         debugPrint('All requested features supported');
       }
@@ -187,7 +185,7 @@ class _MyIosAppState extends State<MyIosApp> {
   void start() {
     workout.start(
       exerciseType: exerciseType,
-      features: [],
+      features: const [],
       locationType: locationType,
       swimmingLocationType: swimmingLocationType,
       lapLength: lapLength,

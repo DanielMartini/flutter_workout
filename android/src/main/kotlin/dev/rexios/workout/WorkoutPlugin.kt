@@ -32,19 +32,12 @@ class WorkoutPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, ExerciseU
 
     private lateinit var exerciseClient: ExerciseClient
 
-    // Generate the ExerciseType dart enum and print it to logcat for copy/paste
-//    private fun generateExerciseTypeEnum() {
-//        fun String.toCamelCase(): String {
-//            val split = split("_")
-//            return split.first().lowercase() + split.drop(1)
-//                .joinToString("") { it.lowercase().replaceFirstChar { it.uppercase() } }
-//        }
-//        ExerciseType.VALUES.forEach {
-//            val name = it.name.toCamelCase()
-//            Log.d("WorkoutPlugin", "/// $name")
-//            Log.d("WorkoutPlugin", "$name(${it.id}),")
-//        }
-//    }
+    private var lastUpdateTime = 0L
+    private var minUpdateIntervalMillis: Long = 1000L
+
+    // Cache para los últimos datos enviados
+    private var lastSentData: Map<String, Map<String, Any>>? = null
+    private var callbackCount = 0L
 
     override fun onAttachedToEngine(flutterPluginBinding: FlutterPlugin.FlutterPluginBinding) {
         channel = MethodChannel(flutterPluginBinding.binaryMessenger, "workout")
@@ -62,7 +55,6 @@ class WorkoutPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, ExerciseU
                 stop()
                 result.success(null)
             }
-
             else -> result.notImplemented()
         }
     }
@@ -116,6 +108,13 @@ class WorkoutPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, ExerciseU
 
         val enableGps = arguments["enableGps"] as Boolean
 
+        // Obtener el intervalo de actualización
+        minUpdateIntervalMillis = when (val interval = arguments["updateIntervalMillis"]) {
+            is Int -> interval.toLong()
+            is Long -> interval
+            else -> 1000L
+        }
+
         lifecycleScope.launch {
             val capabilities = exerciseClient.getCapabilitiesAsync().await()
             if (exerciseType !in capabilities.supportedExerciseTypes) {
@@ -136,7 +135,11 @@ class WorkoutPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, ExerciseU
 
             exerciseClient.startExerciseAsync(config).await()
 
-            // Return the unsupported data types so the developer can handle them
+            // Resetear contadores
+            lastUpdateTime = 0L
+            lastSentData = null
+            callbackCount = 0L
+
             result.success(mapOf("unsupportedFeatures" to requestedUnsupportedDataTypes.map {
                 dataTypeToString(it)
             }))
@@ -144,33 +147,99 @@ class WorkoutPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, ExerciseU
     }
 
     override fun onExerciseUpdateReceived(update: ExerciseUpdate) {
-        val data = mutableListOf<List<Any>>()
-        val bootInstant =
-            Instant.ofEpochMilli(System.currentTimeMillis() - SystemClock.elapsedRealtime())
+        callbackCount++
+        val currentTime = System.currentTimeMillis()
 
+        // FILTRO TEMPORAL ESTRICTO - aplicar límite de frecuencia
+        if (lastUpdateTime != 0L && currentTime - lastUpdateTime < minUpdateIntervalMillis) {
+            return
+        }
+
+        // Actualizar el timestamp aquí para aplicar throttling
+        lastUpdateTime = currentTime
+
+        val healthData = mutableMapOf<String, Any>()
+        val bootInstant = Instant.ofEpochMilli(currentTime - SystemClock.elapsedRealtime())
+
+        var hasData = false
+
+        // Procesar sampleDataPoints
         update.latestMetrics.sampleDataPoints.forEach { dataPoint ->
-            data.add(
-                listOf(
-                    dataTypeToString(dataPoint.dataType),
-                    (dataPoint.value as Number).toDouble(),
-                    dataPoint.getTimeInstant(bootInstant).toEpochMilli()
-                )
-            )
+            val dataType = dataTypeToString(dataPoint.dataType)
+            val value = (dataPoint.value as Number).toDouble()
+            val timestamp = dataPoint.getTimeInstant(bootInstant).toEpochMilli()
+
+            healthData[dataType] = mapOf("value" to value, "timestamp" to timestamp)
+            hasData = true
         }
 
+        // Procesar cumulativeDataPoints
         update.latestMetrics.cumulativeDataPoints.forEach { dataPoint ->
-            data.add(
-                listOf(
-                    dataTypeToString(dataPoint.dataType), dataPoint.total.toDouble(),
-                    // I feel like this should have getEndInstant on it like above, but whatever
-                    dataPoint.end.toEpochMilli()
-                )
-            )
+            val dataType = dataTypeToString(dataPoint.dataType)
+            val total = dataPoint.total.toDouble()
+            val timestamp = dataPoint.end.toEpochMilli()
+
+            healthData[dataType] = mapOf("value" to total, "timestamp" to timestamp)
+            hasData = true
         }
 
-        data.forEach {
-            channel.invokeMethod("dataReceived", it)
+        // Solo procesar si tenemos datos Y hay cambios relevantes
+        if (hasData && shouldSendUpdate(healthData)) {
+            lastSentData = healthData.mapValues { it.value as Map<String, Any> }
+
+            // Enviar datos a Flutter
+            channel.invokeMethod("dataReceived", healthData)
         }
+    }
+
+    /**
+     * Verifica si los datos han cambiado significativamente
+     */
+    private fun shouldSendUpdate(newData: Map<String, Any>): Boolean {
+        val lastData = lastSentData
+
+        // Si es la primera vez, enviar
+        if (lastData == null) return true
+
+        // Si no hay datos nuevos, no enviar
+        if (newData.isEmpty()) return false
+
+        // Comparar cada tipo de dato
+        for ((dataType, newValue) in newData) {
+            val newValueMap = newValue as Map<String, Any>
+            val lastValueMap = lastData[dataType] as? Map<String, Any>
+
+            if (lastValueMap == null) {
+                // Nuevo tipo de dato, enviar
+                return true
+            }
+
+            val newVal = newValueMap["value"] as Double
+            val lastVal = lastValueMap["value"] as Double
+
+            // Verificar si hay cambio significativo
+            if (hasSignificantChange(dataType, newVal, lastVal)) {
+                return true
+            }
+        }
+
+        return false
+    }
+
+    /**
+     * Determina si hay un cambio significativo
+     */
+    private fun hasSignificantChange(dataType: String, newValue: Double, oldValue: Double): Boolean {
+        val threshold = when (dataType) {
+            "heartRate" -> 1.0    // ±1 BPM
+            "calories" -> 0.1     // ±0.1 kcal
+            "steps" -> 1.0        // ±1 paso
+            "distance" -> 1.0     // ±1 metro
+            "speed" -> 0.1        // ±0.1 m/s
+            else -> 0.1
+        }
+
+        return kotlin.math.abs(newValue - oldValue) >= threshold
     }
 
     override fun onLapSummaryReceived(lapSummary: ExerciseLapSummary) {}
@@ -180,5 +249,8 @@ class WorkoutPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, ExerciseU
 
     private fun stop() {
         exerciseClient.endExerciseAsync()
+        lastSentData = null
+        lastUpdateTime = 0L
+        callbackCount = 0L
     }
 }
