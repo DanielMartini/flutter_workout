@@ -1,6 +1,8 @@
+import 'package:meta/meta.dart';
 import 'package:workout/src/model/workout_feature.dart';
 
 /// The result of starting a workout session
+@immutable
 class WorkoutStartResult {
   /// Wear OS: Requested features unsupported by the given exercise type
   ///
@@ -9,7 +11,7 @@ class WorkoutStartResult {
   /// iOS: Always empty
   final List<WorkoutFeature> unsupportedFeatures;
 
-  WorkoutStartResult._({required this.unsupportedFeatures});
+  const WorkoutStartResult._({required this.unsupportedFeatures});
 
   WorkoutStartResult._empty() : this._(unsupportedFeatures: []);
 

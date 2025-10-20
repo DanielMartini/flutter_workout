@@ -25,7 +25,7 @@ dependency_overrides:
       ref: c4ebde972bfd710d3c4c9301717eea25dd211f8e
 
 dev_dependencies:
-  rexios_lints: ^11.0.6
+  rexios_lints: ^15.0.1
 
 flutter:
   uses-material-design: true

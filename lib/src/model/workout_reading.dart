@@ -1,6 +1,8 @@
 import 'package:workout/src/model/workout_feature.dart';
+import 'package:meta/meta.dart';
 
 /// A sensor reading collected from the watch
+@immutable
 class WorkoutReading {
   /// The timestamp of the [WorkoutReading]
   final DateTime timestamp;

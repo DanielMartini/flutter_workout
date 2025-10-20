@@ -33,7 +33,7 @@ class _MyAppState extends State<MyApp> {
   double steps = 0;
   double distance = 0;
   double speed = 0;
-  bool started = false;
+  var started = false;
 
   _MyAppState() {
     workout.stream.listen((event) {
