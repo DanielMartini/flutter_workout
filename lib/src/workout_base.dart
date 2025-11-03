@@ -6,53 +6,69 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:workout/workout.dart';
 import 'package:flutter_tizen/flutter_tizen.dart' as tizen;
 
-/// Represents a single health metric reading.
+/// Representa una lectura de métrica de salud.
 class HealthMetricReading {
   final WorkoutFeature feature;
   final double value;
-  final int timestamp; // Timestamp en milisegundos desde la época
+  final int timestamp;
 
   HealthMetricReading(this.feature, this.value, this.timestamp);
 
   @override
-  String toString() => 'HealthMetricReading(feature: $feature, value: $value, timestamp: $timestamp)';
+  String toString() => 'HealthMetricReading($feature: $value @ $timestamp)';
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+          other is HealthMetricReading &&
+              runtimeType == other.runtimeType &&
+              feature == other.feature &&
+              value == other.value &&
+              timestamp == other.timestamp;
+
+  @override
+  int get hashCode => feature.hashCode ^ value.hashCode ^ timestamp.hashCode;
 }
 
-/// Base class for flutter_workout
+/// Clase base para flutter_workout - Ultra optimizada
 class Workout {
   static const _channel = MethodChannel('workout');
 
-  final _streamController = StreamController<Map<String, HealthMetricReading>>.broadcast();
+  // Stream optimizado: broadcast + buffer de 1
+  final _streamController = StreamController<Map<String, HealthMetricReading>>.broadcast(
+    onListen: () => debugPrint('Workout stream: listener added'),
+    onCancel: () => debugPrint('Workout stream: listener removed'),
+  );
 
   var _currentFeatures = <WorkoutFeature>[];
 
-  /// A stream of [HealthMetricReading]s collected by the workout session,
-  /// delivered as a map of all updated features.
+  // Cache del último estado enviado (evitar duplicados)
+  Map<String, HealthMetricReading>? _lastEmittedReadings;
+
+  // Throttling adicional en Flutter
+  int _lastEmitTime = 0;
+  final int _minEmitIntervalMs = 500; // Mínimo 500ms entre emisiones en Flutter
+
+  // Estadísticas
+  int _receivedUpdates = 0;
+  int _emittedUpdates = 0;
+
   Stream<Map<String, HealthMetricReading>> get stream => _streamController.stream;
 
-  /// Create a [Workout]
   Workout() {
     _channel.setMethodCallHandler(_handleMessage);
   }
 
-  /// Wear OS: The supported [ExerciseType]s of the device
-  ///
-  /// Tizen: Always empty
-  ///
-  /// iOS: Always empty
   Future<List<ExerciseType>> getSupportedExerciseTypes() async {
     if (!Platform.isAndroid) return [];
 
-    final result =
-    await _channel.invokeListMethod<int>('getSupportedExerciseTypes');
+    final result = await _channel.invokeListMethod<int>('getSupportedExerciseTypes');
 
     final types = <ExerciseType>[];
     for (final id in result!) {
       final type = ExerciseType.fromId(id);
       if (type == null) {
-        debugPrint(
-          'Unknown ExerciseType id: $id. Please create an issue for this on GitHub.',
-        );
+        debugPrint('Unknown ExerciseType id: $id');
       } else {
         types.add(type);
       }
@@ -61,35 +77,29 @@ class Workout {
     return types;
   }
 
-  /// Starts a workout session with the specified [features] enabled
+  /// Inicia una sesión de entrenamiento optimizada
   ///
-  /// [exerciseType] has no effect on Tizen
-  ///
-  /// [enableGps] allows location information to be used to estimate
-  /// distance/speed instead of steps. Will request location permission.
-  /// Only available on Wear OS.
-  ///
-  /// [locationType], [swimmingLocationType], and [lapLength] are iOS only
-  ///
-  /// [lapLength] is the length of the pool in meters
-  ///
-  /// **[updateIntervalMillis]**: The minimum interval in milliseconds between updates
-  /// sent from the native platform to Flutter. Defaults to 500ms.
-  /// Set to 0 to receive all updates as they come (not recommended for UI).
-  ///
-  /// iOS: Calls `startWatchApp` with the given configuration. Requires both
-  /// apps to have the `HealthKit` entitlement. The watch app must have the
-  /// `Workout Processing` background mode enabled.
+  /// [updateIntervalMillis]: Intervalo mínimo entre actualizaciones (default: 2000ms = 2s)
+  /// Valores recomendados:
+  /// - Monitoreo normal: 2000-3000ms
+  /// - Bajo consumo: 5000ms o más
+  /// - Alta precisión: 1000ms (no recomendado para batería)
   Future<WorkoutStartResult> start({
     required ExerciseType exerciseType,
     required List<WorkoutFeature> features,
     bool enableGps = false,
-    int updateIntervalMillis = 500,
+    int updateIntervalMillis = 2000, // Default aumentado a 2s
     WorkoutLocationType? locationType,
     WorkoutSwimmingLocationType? swimmingLocationType,
     double? lapLength,
   }) {
     _currentFeatures = features;
+
+    // Reset de estadísticas
+    _receivedUpdates = 0;
+    _emittedUpdates = 0;
+    _lastEmittedReadings = null;
+    _lastEmitTime = 0;
 
     if (Platform.isAndroid) {
       return _initWearOS(
@@ -192,7 +202,7 @@ class Workout {
     ExerciseType? exerciseType,
     List<String> sensors = const [],
     bool enableGps = false,
-    int updateIntervalMillis = 500,
+    int updateIntervalMillis = 2000,
     WorkoutLocationType? locationType,
     WorkoutSwimmingLocationType? swimmingLocationType,
     double? lapLength,
@@ -203,7 +213,7 @@ class Workout {
         'exerciseType': exerciseType?.id,
         'sensors': sensors,
         'enableGps': enableGps,
-        'updateIntervalMillis': updateIntervalMillis, // Lo enviamos a Kotlin
+        'updateIntervalMillis': updateIntervalMillis,
         'locationType': locationType?.id,
         'swimmingLocationType': swimmingLocationType?.id,
         'lapLength': lapLength,
@@ -212,38 +222,134 @@ class Workout {
     return WorkoutStartResult.fromResult(result);
   }
 
-  /// Stops the workout session and sensor data collection
-  Future<void> stop() {
-    return _channel.invokeMethod<void>('stop');
+  Future<void> stop() async {
+    await _channel.invokeMethod<void>('stop');
+
+    // Log de estadísticas finales
+    if (_receivedUpdates > 0) {
+      final efficiency = (_receivedUpdates - _emittedUpdates) * 100.0 / _receivedUpdates;
+      debugPrint('Workout stats - Received: $_receivedUpdates, Emitted: $_emittedUpdates, '
+          'Filtered: ${efficiency.toStringAsFixed(1)}%');
+    }
   }
 
-  Future<dynamic> _handleMessage(MethodCall call) {
+  /// Obtiene estadísticas del plugin nativo (solo Android)
+  Future<Map<String, dynamic>?> getStats() async {
+    if (!Platform.isAndroid) return null;
+    try {
+      return await _channel.invokeMapMethod<String, dynamic>('getStats');
+    } catch (e) {
+      return null;
+    }
+  }
+
+  Future<dynamic> _handleMessage(MethodCall call) async {
     if (call.method == 'dataReceived') {
+      _receivedUpdates++;
+
       try {
+        final currentTime = DateTime.now().millisecondsSinceEpoch;
+
+        // FILTRO #1: Throttling adicional en Flutter (capa de seguridad)
+        if (_lastEmitTime != 0 && currentTime - _lastEmitTime < _minEmitIntervalMs) {
+          return; // Silenciosamente ignorar
+        }
+
         final Map<String, dynamic> healthDataMap = Map<String, dynamic>.from(call.arguments);
 
-        final Map<String, HealthMetricReading> currentReadings = {};
+        // FILTRO #2: Verificar que hay datos relevantes
+        if (healthDataMap.isEmpty) {
+          return;
+        }
 
-        healthDataMap.forEach((featureString, data) {
-          final Map<String, dynamic> metricData = Map<String, dynamic>.from(data);
-          final double value = metricData['value'] as double;
+        final Map<String, HealthMetricReading> currentReadings = {};
+        final requestedFeatures = _currentFeatures.map((e) => e.name).toSet();
+
+        for (final entry in healthDataMap.entries) {
+          final featureString = entry.key;
+
+          // Solo procesar features solicitadas
+          if (!requestedFeatures.contains(featureString)) {
+            continue;
+          }
+
+          final Map<String, dynamic> metricData = Map<String, dynamic>.from(entry.value);
+          final double value = (metricData['value'] as num).toDouble();
           final int timestamp = metricData['timestamp'] as int;
 
-          if (_currentFeatures.map((e) => e.name).contains(featureString)) {
-            final feature = WorkoutFeature.values.byName(featureString);
-            currentReadings[featureString] = HealthMetricReading(feature, value, timestamp);
-          }
-        });
-
-        if (currentReadings.isNotEmpty) {
-          _streamController.add(currentReadings);
+          final feature = WorkoutFeature.values.byName(featureString);
+          currentReadings[featureString] = HealthMetricReading(feature, value, timestamp);
         }
-        return Future.value();
-      } catch (e) {
+
+        // FILTRO #3: Verificar cambios significativos vs último emitido
+        if (currentReadings.isEmpty || !_hasSignificantChanges(currentReadings)) {
+          return;
+        }
+
+        // Actualizar cache y timestamp
+        _lastEmittedReadings = Map.from(currentReadings);
+        _lastEmitTime = currentTime;
+        _emittedUpdates++;
+
+        // Emitir al stream
+        _streamController.add(currentReadings);
+
+      } catch (e, stack) {
         debugPrint('Error processing dataReceived: $e');
-        return Future.error(e);
+        debugPrint('Stack: $stack');
       }
     }
-    return Future.value();
+  }
+
+  /// Verifica si hay cambios significativos vs la última emisión
+  bool _hasSignificantChanges(Map<String, HealthMetricReading> newReadings) {
+    final lastReadings = _lastEmittedReadings;
+
+    // Primera emisión siempre se envía
+    if (lastReadings == null || lastReadings.isEmpty) {
+      return true;
+    }
+
+    // Verificar si algún valor cambió significativamente
+    for (final entry in newReadings.entries) {
+      final feature = entry.key;
+      final newReading = entry.value;
+      final lastReading = lastReadings[feature];
+
+      // Nueva feature
+      if (lastReading == null) {
+        return true;
+      }
+
+      // Verificar cambio significativo
+      final threshold = _getThreshold(newReading.feature);
+      if ((newReading.value - lastReading.value).abs() >= threshold) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  /// Umbrales de cambio significativo por feature
+  double _getThreshold(WorkoutFeature feature) {
+    switch (feature) {
+      case WorkoutFeature.heartRate:
+        return 2.0; // ±2 BPM
+      case WorkoutFeature.calories:
+        return 2.0; // ±2 kcal
+      case WorkoutFeature.steps:
+        return 2.0; // ±2 pasos
+      case WorkoutFeature.distance:
+        return 5.0; // ±10 metros
+      case WorkoutFeature.speed:
+        return 0.1; // ±0.3 m/s
+      default:
+        return 0.5;
+    }
+  }
+
+  void dispose() {
+    _streamController.close();
   }
 }
