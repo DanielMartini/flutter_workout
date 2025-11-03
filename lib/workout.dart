@@ -1,5 +1,3 @@
-library workout;
-
 // model
 export 'src/model/exercise_type.dart';
 export 'src/model/workout_feature.dart';

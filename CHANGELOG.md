@@ -1,3 +1,7 @@
+## 0.6.9
+
+- Dependency upgrades
+
 ## 0.6.8
 
 - Dependency upgrades
