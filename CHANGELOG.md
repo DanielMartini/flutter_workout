@@ -1,3 +1,7 @@
+## 0.6.10
+
+- Supports SwiftPM
+
 ## 0.6.9
 
 - Dependency upgrades
