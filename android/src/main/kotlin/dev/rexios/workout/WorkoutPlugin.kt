@@ -1,7 +1,14 @@
 package dev.rexios.workout
 
+import android.Manifest
+import android.app.Activity
+import android.content.Context
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.SystemClock
 import androidx.concurrent.futures.await
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import androidx.health.services.client.ExerciseClient
 import androidx.health.services.client.ExerciseUpdateCallback
 import androidx.health.services.client.HealthServices
@@ -18,20 +25,29 @@ import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.embedding.engine.plugins.activity.ActivityAware
 import io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding
 import io.flutter.embedding.engine.plugins.lifecycle.FlutterLifecycleAdapter
+import io.flutter.plugin.common.PluginRegistry
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugin.common.MethodChannel.MethodCallHandler
 import io.flutter.plugin.common.MethodChannel.Result
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import java.time.Instant
 import kotlin.math.abs
 
 /** WorkoutPlugin*/
-class WorkoutPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, ExerciseUpdateCallback {
+class WorkoutPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, ExerciseUpdateCallback,
+    PluginRegistry.RequestPermissionsResultListener {
     private lateinit var channel: MethodChannel
     private lateinit var lifecycleScope: CoroutineScope
     private lateinit var exerciseClient: ExerciseClient
+    private lateinit var applicationContext: Context
+    private var activity: Activity? = null
+    private var activityBinding: ActivityPluginBinding? = null
+    private var pendingPermissionResult: Result? = null
+    private var pendingPermissionRequestCode: Int? = null
+    private var pendingPermissions: Array<String> = emptyArray()
 
     private var lastUpdateTime = 0L
     private var minUpdateIntervalMillis: Long = 1000L
@@ -78,17 +94,40 @@ class WorkoutPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, ExerciseU
             "distance" to 5000L,   // Distancia cada 5s
             "speed" to 2000L,      // Velocidad cada 2s
         )
+
+        private const val HEALTH_PERMISSIONS_REQUEST_CODE = 7210
+        private const val LOCATION_PERMISSIONS_REQUEST_CODE = 7211
+        private const val READ_HEART_RATE_PERMISSION = "android.permission.health.READ_HEART_RATE"
     }
 
     override fun onAttachedToEngine(flutterPluginBinding: FlutterPlugin.FlutterPluginBinding) {
         channel = MethodChannel(flutterPluginBinding.binaryMessenger, "workout")
         channel.setMethodCallHandler(this)
-        exerciseClient = HealthServices.getClient(flutterPluginBinding.applicationContext).exerciseClient
+        applicationContext = flutterPluginBinding.applicationContext
+        exerciseClient = HealthServices.getClient(applicationContext).exerciseClient
     }
 
     override fun onMethodCall(call: MethodCall, result: Result) {
         when (call.method) {
             "getSupportedExerciseTypes" -> getSupportedExerciseTypes(result)
+            "hasHealthPermissions" -> result.success(hasPermissions(requiredHealthPermissions(call)))
+            "requestHealthPermissions" -> requestPermissions(
+                requiredHealthPermissions(call),
+                HEALTH_PERMISSIONS_REQUEST_CODE,
+                result,
+            )
+            "isAnyHealthPermissionPermanentlyDenied" -> result.success(
+                isAnyPermissionPermanentlyDenied(requiredHealthPermissions(call)),
+            )
+            "hasFineLocationPermission" -> result.success(hasFineLocationPermission())
+            "requestFineLocationPermission" -> requestPermissions(
+                arrayOf(
+                    Manifest.permission.ACCESS_COARSE_LOCATION,
+                    Manifest.permission.ACCESS_FINE_LOCATION,
+                ),
+                LOCATION_PERMISSIONS_REQUEST_CODE,
+                result,
+            )
             "start" -> start(call.arguments as Map<String, Any>, result)
             "stop" -> {
                 stop()
@@ -110,18 +149,123 @@ class WorkoutPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, ExerciseU
 
     override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
         channel.setMethodCallHandler(null)
+        pendingPermissionResult?.error(
+            "engine_detached",
+            "The Flutter engine detached before the permission request completed",
+            null,
+        )
+        clearPendingPermissionRequest()
         stop()
     }
 
     override fun onAttachedToActivity(binding: ActivityPluginBinding) {
+        activity = binding.activity
+        activityBinding = binding
+        binding.addRequestPermissionsResultListener(this)
+
         val lifecycle: Lifecycle = FlutterLifecycleAdapter.getActivityLifecycle(binding)
         lifecycleScope = lifecycle.coroutineScope
         exerciseClient.setUpdateCallback(this)
     }
 
-    override fun onDetachedFromActivityForConfigChanges() {}
-    override fun onReattachedToActivityForConfigChanges(p0: ActivityPluginBinding) {}
-    override fun onDetachedFromActivity() {}
+    override fun onDetachedFromActivityForConfigChanges() {
+        detachFromActivity()
+    }
+
+    override fun onReattachedToActivityForConfigChanges(binding: ActivityPluginBinding) {
+        onAttachedToActivity(binding)
+    }
+
+    override fun onDetachedFromActivity() {
+        detachFromActivity()
+    }
+
+    private fun detachFromActivity() {
+        activityBinding?.removeRequestPermissionsResultListener(this)
+        activityBinding = null
+        activity = null
+    }
+
+    private fun requiredHealthPermissions(call: MethodCall): Array<String> {
+        val permissions = mutableListOf<String>()
+        val heartRate = call.argument<Boolean>("heartRate") ?: true
+        val activityRecognition = call.argument<Boolean>("activityRecognition") ?: true
+
+        if (activityRecognition && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            permissions.add(Manifest.permission.ACTIVITY_RECOGNITION)
+        }
+
+        if (heartRate) {
+            permissions.add(
+                if (Build.VERSION.SDK_INT >= 36) {
+                    READ_HEART_RATE_PERMISSION
+                } else {
+                    Manifest.permission.BODY_SENSORS
+                },
+            )
+        }
+
+        return permissions.toTypedArray()
+    }
+
+    private fun hasPermissions(permissions: Array<String>): Boolean {
+        return permissions.all { permission ->
+            ContextCompat.checkSelfPermission(applicationContext, permission) == PackageManager.PERMISSION_GRANTED
+        }
+    }
+
+    private fun requestPermissions(permissions: Array<String>, requestCode: Int, result: Result) {
+        if (hasPermissions(permissions)) {
+            result.success(true)
+            return
+        }
+
+        val currentActivity = activity
+        if (currentActivity == null) {
+            result.error("activity_unavailable", "An Android activity is required to request permissions", null)
+            return
+        }
+
+        if (pendingPermissionResult != null) {
+            result.error("request_in_progress", "Another permission request is already in progress", null)
+            return
+        }
+
+        pendingPermissionResult = result
+        pendingPermissionRequestCode = requestCode
+        pendingPermissions = permissions
+        ActivityCompat.requestPermissions(currentActivity, permissions, requestCode)
+    }
+
+    private fun isAnyPermissionPermanentlyDenied(permissions: Array<String>): Boolean {
+        val currentActivity = activity ?: return false
+        return permissions.any { permission ->
+            !hasPermissions(arrayOf(permission)) &&
+                !ActivityCompat.shouldShowRequestPermissionRationale(currentActivity, permission)
+        }
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ): Boolean {
+        if (requestCode != pendingPermissionRequestCode) {
+            return false
+        }
+
+        val result = pendingPermissionResult
+        val requestedPermissions = pendingPermissions
+        clearPendingPermissionRequest()
+        result?.success(hasPermissions(requestedPermissions))
+        return true
+    }
+
+    private fun clearPendingPermissionRequest() {
+        pendingPermissionResult = null
+        pendingPermissionRequestCode = null
+        pendingPermissions = emptyArray()
+    }
 
     private fun dataTypeToString(type: DataType<*, *>): String {
         return DATA_TYPE_MAP[type] ?: "unknown"
@@ -134,8 +278,14 @@ class WorkoutPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, ExerciseU
 
     private fun getSupportedExerciseTypes(result: Result) {
         lifecycleScope.launch {
-            val capabilities = exerciseClient.getCapabilitiesAsync().await()
-            result.success(capabilities.supportedExerciseTypes.map { it.id })
+            try {
+                val capabilities = exerciseClient.getCapabilitiesAsync().await()
+                result.success(capabilities.supportedExerciseTypes.map { it.id })
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                reportFailure(result, "get_capabilities_failed", error)
+            }
         }
     }
 
@@ -144,7 +294,7 @@ class WorkoutPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, ExerciseU
         val exerciseType = ExerciseType.fromId(exerciseTypeId)
         val typeStrings = arguments["sensors"] as List<String>
         val requestedDataTypes = typeStrings.map { dataTypeFromString(it) }
-        val enableGps = arguments["enableGps"] as Boolean
+        val enableGps = arguments["enableGps"] as Boolean && hasFineLocationPermission()
 
         // Forzar mínimo de 1000ms
         minUpdateIntervalMillis = when (val interval = arguments["updateIntervalMillis"]) {
@@ -154,49 +304,72 @@ class WorkoutPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, ExerciseU
         }
 
         lifecycleScope.launch {
-            val capabilities = exerciseClient.getCapabilitiesAsync().await()
-            if (exerciseType !in capabilities.supportedExerciseTypes) {
-                result.error("ExerciseType $exerciseType not supported", null, null)
-                return@launch
-            }
-
-            val exerciseCapabilities = capabilities.getExerciseTypeCapabilities(exerciseType)
-            val supportedDataTypes = exerciseCapabilities.supportedDataTypes
-            val requestedUnsupportedDataTypes = requestedDataTypes.minus(supportedDataTypes)
-            val requestedSupportedDataTypes = requestedDataTypes.intersect(supportedDataTypes)
-
-            // Configuración ultra-optimizada
-            val config = ExerciseConfig.builder(exerciseType)
-                .setDataTypes(requestedSupportedDataTypes)
-                .setIsAutoPauseAndResumeEnabled(false)
-                .setIsGpsEnabled(enableGps)
-                .apply {
-                    // Siempre usar batching cuando sea posible
-                    when {
-                        minUpdateIntervalMillis >= 5000 ->
-                            setBatchingModeOverride(BatchingMode.HEART_RATE_5_SECONDS)
-                        minUpdateIntervalMillis >= 3000 ->
-                            setBatchingModeOverride(BatchingMode.HEART_RATE_5_SECONDS)
-                    }
+            try {
+                val capabilities = exerciseClient.getCapabilitiesAsync().await()
+                if (exerciseType !in capabilities.supportedExerciseTypes) {
+                    result.error("unsupported_exercise", "ExerciseType $exerciseType not supported", null)
+                    return@launch
                 }
-                .build()
 
-            exerciseClient.startExerciseAsync(config).await()
+                val exerciseCapabilities = capabilities.getExerciseTypeCapabilities(exerciseType)
+                val supportedDataTypes = exerciseCapabilities.supportedDataTypes
+                val requestedUnsupportedDataTypes = requestedDataTypes.minus(supportedDataTypes)
+                val requestedSupportedDataTypes = requestedDataTypes.intersect(supportedDataTypes)
 
-            // Reset completo
-            lastUpdateTime = 0L
-            lastCheckTime = 0L
-            lastSentValues.clear()
-            lastSentTimestamps.clear()
-            healthDataPool.clear()
-            bootInstantMillis = 0L
-            droppedCallbacks = 0L
-            processedCallbacks = 0L
+                // Configuración ultra-optimizada
+                val config = ExerciseConfig.builder(exerciseType)
+                    .setDataTypes(requestedSupportedDataTypes)
+                    .setIsAutoPauseAndResumeEnabled(false)
+                    .setIsGpsEnabled(enableGps)
+                    .apply {
+                        // Siempre usar batching cuando sea posible
+                        when {
+                            minUpdateIntervalMillis >= 5000 ->
+                                setBatchingModeOverrides(setOf(BatchingMode.HEART_RATE_5_SECONDS))
+                            minUpdateIntervalMillis >= 3000 ->
+                                setBatchingModeOverrides(setOf(BatchingMode.HEART_RATE_5_SECONDS))
+                        }
+                    }
+                    .build()
 
-            result.success(mapOf(
-                "unsupportedFeatures" to requestedUnsupportedDataTypes.map { dataTypeToString(it) }
-            ))
+                exerciseClient.startExerciseAsync(config).await()
+
+                // Reset completo
+                lastUpdateTime = 0L
+                lastCheckTime = 0L
+                lastSentValues.clear()
+                lastSentTimestamps.clear()
+                healthDataPool.clear()
+                bootInstantMillis = 0L
+                droppedCallbacks = 0L
+                processedCallbacks = 0L
+
+                result.success(mapOf(
+                    "unsupportedFeatures" to requestedUnsupportedDataTypes.map { dataTypeToString(it) }
+                ))
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: SecurityException) {
+                reportFailure(result, "permission_denied", error)
+            } catch (error: Exception) {
+                reportFailure(result, "start_failed", error)
+            }
         }
+    }
+
+    private fun hasFineLocationPermission(): Boolean {
+        return ContextCompat.checkSelfPermission(
+            applicationContext,
+            Manifest.permission.ACCESS_FINE_LOCATION,
+        ) == PackageManager.PERMISSION_GRANTED
+    }
+
+    private fun reportFailure(result: Result, code: String, error: Exception) {
+        result.error(
+            code,
+            error.message ?: "Health Services request failed",
+            error.javaClass.name,
+        )
     }
 
     override fun onExerciseUpdateReceived(update: ExerciseUpdate) {

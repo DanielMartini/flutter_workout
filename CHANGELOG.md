@@ -1,3 +1,9 @@
+## 0.6.11
+
+- Adds native Wear OS permission APIs, including `READ_HEART_RATE` on API 36+
+- Prevents GPS workouts from starting without `ACCESS_FINE_LOCATION`
+- Converts asynchronous Health Services failures into Flutter errors instead of process crashes
+
 ## 0.6.10
 
 - Supports SwiftPM

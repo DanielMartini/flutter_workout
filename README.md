@@ -12,15 +12,31 @@ android/app/build.gradle:
 
 `minSdkVersion 30`
 
-android/app/src/main/AndroidManifest.xml:
+The plugin contributes the required permissions to the merged Android manifest,
+including `READ_HEART_RATE` for apps targeting API 36 or newer.
+
+Request access from the host app after explaining why it is needed:
+
+```dart
+final healthGranted = await WorkoutPermissions.requestHealthPermissions();
+final locationGranted = await WorkoutPermissions.requestFineLocationPermission();
+```
+
+Permission checks are also available without showing a system dialog:
+
+```dart
+final hasHealth = await WorkoutPermissions.hasHealthPermissions();
+final hasFineLocation = await WorkoutPermissions.hasFineLocationPermission();
+```
+
+The permissions merged by the plugin are:
 
 ```xml
-<!-- Required for heart rate -->
-<uses-permission android:name="android.permission.BODY_SENSORS" />
-<!-- Required for calories, steps, distance, speed -->
+<uses-permission android:name="android.permission.BODY_SENSORS" android:maxSdkVersion="35" />
+<uses-permission android:name="android.permission.health.READ_HEART_RATE" />
 <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION" />
-<!-- Required to use location to estimate distance, speed -->
 <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+<uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
 ```
 
 ### Tizen

@@ -20,11 +20,11 @@ class HealthMetricReading {
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
-          other is HealthMetricReading &&
-              runtimeType == other.runtimeType &&
-              feature == other.feature &&
-              value == other.value &&
-              timestamp == other.timestamp;
+      other is HealthMetricReading &&
+          runtimeType == other.runtimeType &&
+          feature == other.feature &&
+          value == other.value &&
+          timestamp == other.timestamp;
 
   @override
   int get hashCode => feature.hashCode ^ value.hashCode ^ timestamp.hashCode;
@@ -35,7 +35,8 @@ class Workout {
   static const _channel = MethodChannel('workout');
 
   // Stream optimizado: broadcast + buffer de 1
-  final _streamController = StreamController<Map<String, HealthMetricReading>>.broadcast(
+  final _streamController =
+      StreamController<Map<String, HealthMetricReading>>.broadcast(
     onListen: () => debugPrint('Workout stream: listener added'),
     onCancel: () => debugPrint('Workout stream: listener removed'),
   );
@@ -53,7 +54,8 @@ class Workout {
   int _receivedUpdates = 0;
   int _emittedUpdates = 0;
 
-  Stream<Map<String, HealthMetricReading>> get stream => _streamController.stream;
+  Stream<Map<String, HealthMetricReading>> get stream =>
+      _streamController.stream;
 
   Workout() {
     _channel.setMethodCallHandler(_handleMessage);
@@ -62,7 +64,8 @@ class Workout {
   Future<List<ExerciseType>> getSupportedExerciseTypes() async {
     if (!Platform.isAndroid) return [];
 
-    final result = await _channel.invokeListMethod<int>('getSupportedExerciseTypes');
+    final result =
+        await _channel.invokeListMethod<int>('getSupportedExerciseTypes');
 
     final types = <ExerciseType>[];
     for (final id in result!) {
@@ -129,8 +132,10 @@ class Workout {
     final sensors = <String>[];
 
     if (_currentFeatures.contains(WorkoutFeature.heartRate)) {
-      final status = await Permission.sensors.request();
-      if (status.isGranted) {
+      final granted = await WorkoutPermissions.requestHealthPermissions(
+        activityRecognition: false,
+      );
+      if (granted) {
         sensors.add(WorkoutFeature.heartRate.name);
       }
     }
@@ -142,18 +147,20 @@ class Workout {
       WorkoutFeature.speed,
     };
     final requestedActivityRecognitionFeatures =
-    _currentFeatures.toSet().intersection(activityRecognitionFeatures);
+        _currentFeatures.toSet().intersection(activityRecognitionFeatures);
 
     if (requestedActivityRecognitionFeatures.isNotEmpty) {
-      final status = await Permission.activityRecognition.request();
-      if (status.isGranted) {
+      final granted = await WorkoutPermissions.requestHealthPermissions(
+        heartRate: false,
+      );
+      if (granted) {
         sensors.addAll(requestedActivityRecognitionFeatures.map((e) => e.name));
       }
     }
 
     if (enableGps) {
-      final status = await Permission.location.request();
-      if (!status.isGranted) {
+      final granted = await WorkoutPermissions.requestFineLocationPermission();
+      if (!granted) {
         enableGps = false;
       }
     }
@@ -227,8 +234,10 @@ class Workout {
 
     // Log de estadísticas finales
     if (_receivedUpdates > 0) {
-      final efficiency = (_receivedUpdates - _emittedUpdates) * 100.0 / _receivedUpdates;
-      debugPrint('Workout stats - Received: $_receivedUpdates, Emitted: $_emittedUpdates, '
+      final efficiency =
+          (_receivedUpdates - _emittedUpdates) * 100.0 / _receivedUpdates;
+      debugPrint(
+          'Workout stats - Received: $_receivedUpdates, Emitted: $_emittedUpdates, '
           'Filtered: ${efficiency.toStringAsFixed(1)}%');
     }
   }
@@ -251,11 +260,13 @@ class Workout {
         final currentTime = DateTime.now().millisecondsSinceEpoch;
 
         // FILTRO #1: Throttling adicional en Flutter (capa de seguridad)
-        if (_lastEmitTime != 0 && currentTime - _lastEmitTime < _minEmitIntervalMs) {
+        if (_lastEmitTime != 0 &&
+            currentTime - _lastEmitTime < _minEmitIntervalMs) {
           return; // Silenciosamente ignorar
         }
 
-        final Map<String, dynamic> healthDataMap = Map<String, dynamic>.from(call.arguments);
+        final Map<String, dynamic> healthDataMap =
+            Map<String, dynamic>.from(call.arguments);
 
         // FILTRO #2: Verificar que hay datos relevantes
         if (healthDataMap.isEmpty) {
@@ -273,16 +284,19 @@ class Workout {
             continue;
           }
 
-          final Map<String, dynamic> metricData = Map<String, dynamic>.from(entry.value);
+          final Map<String, dynamic> metricData =
+              Map<String, dynamic>.from(entry.value);
           final double value = (metricData['value'] as num).toDouble();
           final int timestamp = metricData['timestamp'] as int;
 
           final feature = WorkoutFeature.values.byName(featureString);
-          currentReadings[featureString] = HealthMetricReading(feature, value, timestamp);
+          currentReadings[featureString] =
+              HealthMetricReading(feature, value, timestamp);
         }
 
         // FILTRO #3: Verificar cambios significativos vs último emitido
-        if (currentReadings.isEmpty || !_hasSignificantChanges(currentReadings)) {
+        if (currentReadings.isEmpty ||
+            !_hasSignificantChanges(currentReadings)) {
           return;
         }
 
@@ -293,7 +307,6 @@ class Workout {
 
         // Emitir al stream
         _streamController.add(currentReadings);
-
       } catch (e, stack) {
         debugPrint('Error processing dataReceived: $e');
         debugPrint('Stack: $stack');
