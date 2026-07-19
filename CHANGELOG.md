@@ -1,6 +1,7 @@
 ## 0.6.11
 
 - Adds native Wear OS permission APIs, including `READ_HEART_RATE` on API 36+
+- Preserves `BODY_SENSORS` behavior for devices and host apps using older API targets
 - Prevents GPS workouts from starting without `ACCESS_FINE_LOCATION`
 - Converts asynchronous Health Services failures into Flutter errors instead of process crashes
 

@@ -12,8 +12,9 @@ android/app/build.gradle:
 
 `minSdkVersion 30`
 
-The plugin contributes the required permissions to the merged Android manifest,
-including `READ_HEART_RATE` for apps targeting API 36 or newer.
+The plugin contributes both legacy and modern permissions to the merged Android
+manifest. At runtime it uses `READ_HEART_RATE` only when both the device and the
+host app target API 36 or newer; older hosts continue using `BODY_SENSORS`.
 
 Request access from the host app after explaining why it is needed:
 
@@ -32,7 +33,7 @@ final hasFineLocation = await WorkoutPermissions.hasFineLocationPermission();
 The permissions merged by the plugin are:
 
 ```xml
-<uses-permission android:name="android.permission.BODY_SENSORS" android:maxSdkVersion="35" />
+<uses-permission android:name="android.permission.BODY_SENSORS" />
 <uses-permission android:name="android.permission.health.READ_HEART_RATE" />
 <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION" />
 <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />

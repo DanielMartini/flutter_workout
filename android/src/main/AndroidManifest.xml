@@ -1,5 +1,6 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="dev.rexios.workout">
-    <uses-permission android:name="android.permission.BODY_SENSORS" android:maxSdkVersion="35" />
+    <!-- Keep the legacy permission available for host apps targeting API 35 or lower. -->
+    <uses-permission android:name="android.permission.BODY_SENSORS" />
     <uses-permission android:name="android.permission.health.READ_HEART_RATE" />
     <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />

@@ -197,7 +197,7 @@ class WorkoutPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, ExerciseU
 
         if (heartRate) {
             permissions.add(
-                if (Build.VERSION.SDK_INT >= 36) {
+                if (usesModernHealthPermissions()) {
                     READ_HEART_RATE_PERMISSION
                 } else {
                     Manifest.permission.BODY_SENSORS
@@ -206,6 +206,11 @@ class WorkoutPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, ExerciseU
         }
 
         return permissions.toTypedArray()
+    }
+
+    private fun usesModernHealthPermissions(): Boolean {
+        return Build.VERSION.SDK_INT >= 36 &&
+            applicationContext.applicationInfo.targetSdkVersion >= 36
     }
 
     private fun hasPermissions(permissions: Array<String>): Boolean {
